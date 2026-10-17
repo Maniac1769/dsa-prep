@@ -290,6 +290,29 @@ class AuthTest(unittest.TestCase):
         self.assertEqual(self.count("SELECT COUNT(*) FROM users"), 1)
         self.assertGreater(self.count("SELECT COUNT(*) FROM items"), 0, "curriculum is shared and stays")
 
+    # --- timezones ---------------------------------------------------------------------
+
+    def test_legacy_timezone_names_from_browsers_are_stored_canonically(self) -> None:
+        # Chrome still reports Asia/Calcutta; slim Debian images ship no legacy aliases,
+        # so the stored name must be the canonical one or the server cannot load it.
+        user, _ = self.register(tz="Asia/Calcutta")
+        self.assertEqual(user["timezone"], "Asia/Kolkata")
+
+    def test_settings_accept_legacy_names_and_store_the_canonical_one(self) -> None:
+        from app.services import account
+        user, _ = self.register()
+        updated = account.update_settings(self.conn, dict(user), {"timezone": "Europe/Kiev"})
+        self.assertEqual(updated["timezone"], "Europe/Kyiv")
+
+    def test_unknown_timezones_are_still_refused(self) -> None:
+        with self.assertRaises(Invalid):
+            self.register(tz="Mars/Olympus_Mons")
+
+    def test_every_legacy_alias_maps_to_a_zone_the_server_can_load(self) -> None:
+        from zoneinfo import ZoneInfo
+        for old, new in auth.LEGACY_ZONES.items():
+            ZoneInfo(new)  # raises if the canonical target is unknown
+
     def test_admin_reset_password_prints_a_working_one_time_password(self) -> None:
         user, token = self.register()
         fresh = auth.admin_reset_password(self.conn, "asha")

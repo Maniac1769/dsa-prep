@@ -22,7 +22,7 @@ def update_settings(conn: sqlite3.Connection, user: dict, changes: dict) -> dict
     if "preferred_list" in changes and changes["preferred_list"] not in lists.LIST_KEYS:
         raise Invalid(f"Unknown list {changes['preferred_list']!r}.")
     if "timezone" in changes:
-        auth.check_timezone(changes["timezone"])
+        changes["timezone"] = auth.check_timezone(changes["timezone"])
     if "weekly_sessions" in changes and not 3 <= changes["weekly_sessions"] <= 7:
         raise Invalid("Weekly sessions must be between 3 and 7.")
     if "design_sessions" in changes and not 0 <= changes["design_sessions"] <= 7:

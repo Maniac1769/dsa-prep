@@ -118,12 +118,42 @@ def normalize_username(username: str) -> str:
     return name
 
 
+# Browsers report CLDR's zone names, and CLDR keeps some names the tz database has since
+# renamed (Chrome says Asia/Calcutta). Slim Debian images ship no legacy aliases, so these
+# are mapped to the current name before validation and stored that way.
+LEGACY_ZONES = {
+    "Africa/Asmera": "Africa/Asmara",
+    "America/Buenos_Aires": "America/Argentina/Buenos_Aires",
+    "America/Catamarca": "America/Argentina/Catamarca",
+    "America/Coral_Harbour": "America/Atikokan",
+    "America/Cordoba": "America/Argentina/Cordoba",
+    "America/Godthab": "America/Nuuk",
+    "America/Indianapolis": "America/Indiana/Indianapolis",
+    "America/Jujuy": "America/Argentina/Jujuy",
+    "America/Louisville": "America/Kentucky/Louisville",
+    "America/Mendoza": "America/Argentina/Mendoza",
+    "Asia/Calcutta": "Asia/Kolkata",
+    "Asia/Katmandu": "Asia/Kathmandu",
+    "Asia/Rangoon": "Asia/Yangon",
+    "Asia/Saigon": "Asia/Ho_Chi_Minh",
+    "Atlantic/Faeroe": "Atlantic/Faroe",
+    "Europe/Kiev": "Europe/Kyiv",
+    "Europe/Uzhgorod": "Europe/Kyiv",
+    "Europe/Zaporozhye": "Europe/Kyiv",
+    "Pacific/Enderbury": "Pacific/Kanton",
+    "Pacific/Ponape": "Pacific/Pohnpei",
+    "Pacific/Truk": "Pacific/Chuuk",
+}
+
+
 def check_timezone(name: str) -> str:
+    """The canonical IANA name for `name`, or Invalid. Callers must store the return value."""
+    canonical = LEGACY_ZONES.get(name, name)
     try:
-        ZoneInfo(name)
+        ZoneInfo(canonical)
     except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
         raise Invalid(f"Unknown timezone {name[:40]!r}. Use an IANA name such as Asia/Kolkata.") from exc
-    return name
+    return canonical
 
 
 # --- throttling ---------------------------------------------------------------------
@@ -252,7 +282,7 @@ def register(
     _global_gate(moment, "register")
     name = normalize_username(username)
     check_password_rules(password)
-    check_timezone(timezone_name)
+    timezone_name = check_timezone(timezone_name)
     if preferred_list not in lists.LIST_KEYS:
         raise Invalid(f"Unknown list {preferred_list!r}.")
     hashed = hash_password(password)
