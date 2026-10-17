@@ -1,0 +1,4 @@
+# Plain uvicorn, not uvicorn[standard]: uvloop, httptools, watchfiles and PyYAML are
+# not needed for one user. The UI is a prebuilt SPA, so no template engine either.
+fastapi==0.115.6
+uvicorn==0.34.0

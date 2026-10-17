@@ -1,0 +1,64 @@
+# Runs on TERMINUS alongside Coolify's own stack, routed by Coolify's Traefik via
+# the labels below. It is deliberately NOT a Coolify-managed resource: this is one
+# container with one volume, and going through Coolify would add a build pipeline
+# and a database row for no benefit.
+#
+# Secrets come from a local .env file (mode 600), never from this file.
+
+services:
+  dsa-prep:
+    build: .
+    image: dsa-prep:local
+    container_name: dsa-prep
+    restart: unless-stopped
+    networks: [coolify]
+    volumes:
+      - dsa-prep-data:/data
+    environment:
+      DIGEST_TOKEN: ${DIGEST_TOKEN:?set in .env}
+      PUBLIC_URL: https://dsa.abhinavm.work
+      # Accounts: sign-ups stop at this many users. Cookies are Secure (HTTPS only).
+      MAX_USERS: ${MAX_USERS:-20}
+      COOKIE_SECURE: "1"
+      TZ: UTC
+    # Minimal footprint. Measured RSS is well under this; the limit is here so a
+    # runaway cannot touch the Coolify stack sharing the box.
+    mem_limit: 192m
+    mem_reservation: 64m
+    cpus: 0.5
+    pids_limit: 128
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options: { max-size: "2m", max-file: "3" }
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: coolify
+
+      # Plain HTTP exists only to bounce to HTTPS.
+      traefik.http.routers.dsa-http.entryPoints: http
+      traefik.http.routers.dsa-http.rule: Host(`dsa.abhinavm.work`)
+      traefik.http.routers.dsa-http.middlewares: dsa-https
+
+      traefik.http.routers.dsa.entryPoints: https
+      traefik.http.routers.dsa.rule: Host(`dsa.abhinavm.work`)
+      traefik.http.routers.dsa.tls: "true"
+      traefik.http.routers.dsa.tls.certresolver: letsencrypt
+      traefik.http.routers.dsa.service: dsa
+      # Sign-in is the app's own (accounts, sessions, throttling); the edge adds
+      # security headers and compression only.
+      traefik.http.routers.dsa.middlewares: dsa-headers,gzip
+      traefik.http.services.dsa.loadbalancer.server.port: "8080"
+
+      traefik.http.middlewares.dsa-https.redirectscheme.scheme: https
+      traefik.http.middlewares.dsa-headers.headers.stsSeconds: "31536000"
+      traefik.http.middlewares.dsa-headers.headers.contentTypeNosniff: "true"
+      traefik.http.middlewares.dsa-headers.headers.frameDeny: "true"
+      traefik.http.middlewares.dsa-headers.headers.referrerPolicy: no-referrer
+
+volumes:
+  dsa-prep-data:
+
+networks:
+  coolify:
+    external: true

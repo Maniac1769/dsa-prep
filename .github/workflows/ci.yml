@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # "Run workflow" on main redeploys without a new commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12" # same as the Docker image
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r backend/requirements.txt
+      - name: Unit tests
+        working-directory: backend
+        run: python -m unittest discover -s tests -t . -v
+
+  web-and-image:
+    name: Front end, image, smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # frontend/.npmrc sets ignore-scripts, so no package runs install scripts.
+      - name: Typecheck and build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Build the runtime image
+        run: docker build -t dsa-prep:ci .
+      - name: Smoke test the container
+        run: |
+          # COOKIE_SECURE=0: the runner talks plain HTTP, and a Secure cookie would not be sent.
+          docker run -d --name prep -p 8080:8080 -e DIGEST_TOKEN=ci-only -e COOKIE_SECURE=0 dsa-prep:ci
+          base=http://127.0.0.1:8080
+          jar="$RUNNER_TEMP/prep-cookies"
+          for i in $(seq 1 30); do curl -fsS $base/healthz && break; sleep 1; done
+          curl -fsS $base/healthz | grep -q '^ok '
+          curl -fsS $base/ | grep -q '/assets/index-'
+          # Sign up, then the session cookie is what unlocks the API.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -c "$jar" -X POST \
+            -H 'X-Prep: 1' -H 'Content-Type: application/json' \
+            -d '{"username":"ci-user","password":"ci-only-passphrase","timezone":"UTC"}' $base/api/auth/register)
+          test "$code" = 201
+          test "$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" $base/api/today)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' $base/api/today)" = 401
+          curl -fsS $base/api/auth/status | python3 -c 'import json,sys; s=json.load(sys.stdin); assert s["users"] == 1 and s["cap"] == 20, s'
+          # Writes without the X-Prep header must be refused.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"scope":"all"}' $base/api/reset)
+          test "$code" = 403
+      - name: Container logs
+        if: failure()
+        run: docker logs prep || true
+
+  deploy:
+    name: Deploy to TERMINUS
+    needs: [backend, web-and-image]
+    # Only main deploys, after both test jobs pass. Pull requests never get here.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build the front end
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Package
+        run: deploy/package.sh "$RUNNER_TEMP/src.tgz"
+      # Host and host key are secrets, not variables: Actions logs are public and print
+      # step env, and the origin address must stay behind Cloudflare.
+      # The key is locked on the server to deploy/remote-deploy.sh (a forced command):
+      # it can only hand over an archive, never open a shell or forward ports.
+      - name: Deploy
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes -o ConnectTimeout=20 "ubuntu@$DEPLOY_HOST" "deploy $GITHUB_SHA" \
+            < "$RUNNER_TEMP/src.tgz"
+      - name: Remove the key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
